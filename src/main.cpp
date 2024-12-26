@@ -11,9 +11,6 @@
 #include <omp.h>
 #include <random>
 
-const int BUFFER_WIDTH = 1024;
-const int BUFFER_HEIGHT = 512;
-
 class CPUFramebuffer {
 private:
   sf::Texture texture;
@@ -105,6 +102,29 @@ public:
       if (e2 < dx) {
         err += dx;
         y1 += sy;
+      }
+    }
+  }
+
+  void fillRect(int x0, int y0, int x1, int y1, sf::Color color) {
+    for (int y = y0; y < y1; y++) {
+      for (int x = x0; x < x1; x++) {
+        setPixel(x, y, color);
+      }
+    }
+  }
+
+  void mixRect(int x0, int y0, int x1, int y1, sf::Color color, float t) {
+
+    x0 = std::max(0, x0);
+    y0 = std::max(0, y0);
+
+    x1 = std::min(static_cast<int>(width), x1);
+    y1 = std::min(static_cast<int>(height), y1);
+
+    for (int y = y0; y < y1; y++) {
+      for (int x = x0; x < x1; x++) {
+        mixPixel(x, y, color, t);
       }
     }
   }
@@ -547,13 +567,18 @@ struct FirstPersonMouse {
     yaw += (mouse.x - center.x) * sensitivity;
     pitch += (mouse.y - center.y) * sensitivity;
 
+    if (pitch > 89.0f)
+      pitch = 89.0f;
+
+    if (pitch < -89.0f)
+      pitch = -89.0f;
+
     sf::Mouse::setPosition(center);
   }
 
   rotation getOrientation() {
     return rotation::fromAxisAngle({0, 1, 0}, yaw * M_PI / 180.0f) *
            rotation::fromAxisAngle({1, 0, 0}, pitch * M_PI / 180.0f);
-
   }
 };
 
@@ -561,9 +586,9 @@ struct FirstPersonController {
   Camera cam;
   FirstPersonMouse mouse;
 
-  FirstPersonController(sf::Window* window) : cam(60.0f, 16.0f / 9.0f, 0.1f, 100.0f), mouse(window) {
-    cam.position = {0, 0, -5};
-    cam.lookAt({0, 0, 0});
+  FirstPersonController(sf::Window *window)
+      : cam(60.0f, 16.0f / 9.0f, 0.1f, 100.0f), mouse(window) {
+    cam.position = {0, 0, 0};
   }
 
   void update(float dt) {
@@ -581,11 +606,11 @@ struct FirstPersonController {
     }
 
     if (sf::Keyboard::isKeyPressed(sf::Keyboard::A)) {
-      velocity.x += 1;
+      velocity.x -= 1;
     }
 
     if (sf::Keyboard::isKeyPressed(sf::Keyboard::D)) {
-      velocity.x -= 1;
+      velocity.x += 1;
     }
 
     if (sf::Keyboard::isKeyPressed(sf::Keyboard::Space)) {
@@ -602,7 +627,7 @@ struct FirstPersonController {
 
     cam.orientation = mouse.getOrientation();
 
-    //rb.orientation = cam.orientation;
+    // rb.orientation = cam.orientation;
   }
 };
 
@@ -612,64 +637,142 @@ public:
   DepthBuffer *depthBuffer;
   Camera *cam;
 
+  std::mt19937 rng;
+
   RayMarcher(CPUFramebuffer *buffer, DepthBuffer *depthBuffer, Camera *cam)
       : buffer(buffer), depthBuffer(depthBuffer), cam(cam) {}
 
-  float sphere(const vec3 &p, float radius) {
-    return p.length() - radius;
-  }
+  float sphere(const vec3 &p, float radius) { return p.length() - radius; }
 
   float torus(const vec3 &p, float majorRadius, float minorRadius) {
     return sqrtf(p.x * p.x + p.y * p.y) - majorRadius;
   }
 
-  float plane(const vec3 &p, const vec3 &n, float d) {
-    return p.dot(n) + d;
-  }
+  float plane(const vec3 &p, const vec3 &n, float d) { return p.dot(n) + d; }
 
-  float scene(const vec3 &p) {
-    return std::min(sphere(p, 1.0f), torus(p, 1.0f, 0.5f));
+  float scene(const vec3 &p) { return sinf(p.x) + sinf(p.y) + sinf(p.z); }
+
+  vec3 normal(const vec3 &p) {
+    const float epsilon = 0.01f;
+    return vec3(scene(p + vec3(epsilon, 0, 0)) - scene(p - vec3(epsilon, 0, 0)),
+                scene(p + vec3(0, epsilon, 0)) - scene(p - vec3(0, epsilon, 0)),
+                scene(p + vec3(0, 0, epsilon)) - scene(p - vec3(0, 0, epsilon)))
+        .normalized();
   }
 
   float raymarch(const vec3 &origin, const vec3 &direction, float maxDistance,
-                 float epsilon, float minDistance) {
+                 float epsilon, float minDistance, vec3 &normal) {
     float t = minDistance;
+    float v = 0.1f;
+
+    vec3 d = direction.normalized();
+    vec3 p = origin;
+
+    float ret = INFINITY;
 
     for (int i = 0; i < 100; i++) {
-      vec3 p = origin + direction * t;
+
       float dist = scene(p);
 
-      if (dist < epsilon || t > maxDistance)
-        break;
+      if (dist < epsilon) {
 
-      t += dist;
+        ret = t;
+        break;
+      }
+
+      vec3 dp = d * v;
+
+      p += dp;
+      t += dp.length();
+      v += 0.001f;
     }
 
-    return t;
+    normal = this->normal(p);
+
+    return ret;
+  }
+
+  void renderQuadrantRecursive(int x0, int y0, int x1, int y1, float prevDepth,
+                               int level) {
+
+    int w = x1 - x0;
+    int h = y1 - y0;
+
+    float x = 0.5 * (x0 + x1);
+    float y = 0.5 * (y0 + y1);
+
+    const float aperture = 0.1f;
+    const float focalLength = 0.1f;
+
+    vec3 screenPos = {(x - 0.5f * buffer->getWidth()) / buffer->getHeight(),
+                      (y - 0.5f * buffer->getHeight()) / buffer->getHeight(),
+                      0};
+
+    screenPos *= aperture;
+    screenPos.z = focalLength;
+
+    vec3 worldPos = (cam->orientation * screenPos) + cam->position;
+    vec3 direction = (worldPos - cam->position).normalized();
+
+    vec3 normal;
+
+    float depth =
+        raymarch(cam->position, direction, cam->farPlane, 0.01f, 0.01f, normal);
+    sf::Color color = colormaps::grayscale(
+        (-direction.dot(normal) * 0.5 + 0.5) * (exp(-depth * 0.1)));
+
+    // color = mix(color, sf::Color::Black, normal.x);
+
+    float errorHeuristic = normal.cross(direction).lengthSq() * powf(2.0, -2 * level);
+
+    if (level < 3 ||
+         (errorHeuristic > 0.0001 || depth == INFINITY)&&
+            level < 7) {
+      int xMid = 0.5 * (x0 + x1);
+      int yMid = 0.5 * (y0 + y1);
+
+      renderQuadrantRecursive(x0, y0, xMid, yMid, depth, level + 1);
+      renderQuadrantRecursive(xMid, y0, x1, yMid, depth, level + 1);
+      renderQuadrantRecursive(x0, yMid, xMid, y1, depth, level + 1);
+      renderQuadrantRecursive(xMid, yMid, x1, y1, depth, level + 1);
+
+    } else {
+
+      // buffer->drawLine(x0, y0, x1, y0, color);
+      // buffer->drawLine(x1, y0, x1, y1, color);
+      // buffer->drawLine(x1, y1, x0, y1, color);
+      // buffer->drawLine(x0, y1, x0, y0, color);
+      buffer->fillRect(x0, y0, x1, y1, color);
+      // buffer->setPixel(x, y, color);
+    }
   }
 
   void render() {
-    for (int x = 0; x < buffer->getWidth(); x++) {
-      for (int y = 0; y < buffer->getHeight(); y++) {
-        vec3 screenPos = {2.0f * x / buffer->getWidth() - 1.0f,
-                          1.0f - 2.0f * y / buffer->getHeight(), 0};
 
-        vec3 worldPos = cam->screenToWindow(screenPos, buffer->getWidth(),
-                                            buffer->getHeight());
+    std::uniform_int_distribution<int> offsetDist(-10, 10);
 
-        vec3 direction = (worldPos - cam->position).normalized();
+    int x_offset = offsetDist(rng);
+    int y_offset = offsetDist(rng);
 
-        float depth = raymarch(cam->position, direction, cam->farPlane, 0.01f,
-                               0.01f);
-          sf::Color color = colormaps::grayscale(exp(-depth * 0.1f));
-          buffer->setPixel(x, y, color);
-      }
+    int partitionWidth = buffer->getWidth() / 3;
+    int partitionHeight = buffer->getHeight() / 2;
+
+    #pragma omp parallel for
+    for (int k = 0; k < 6; k++) {
+      int i = k % 3;
+      int j = k / 3;
+      renderQuadrantRecursive(i * partitionWidth, j * partitionHeight,
+                              (i + 1) * partitionWidth,
+                              (j + 1) * partitionHeight, 100000.0, 0);
     }
   }
 };
 
 int main() {
-  sf::RenderWindow window(sf::VideoMode(1024, 512), "Raymarching Test");
+
+  auto videoMode = sf::VideoMode::getFullscreenModes()[0];
+
+  sf::RenderWindow window(videoMode, "Raymarching Test", sf::Style::Fullscreen);
   window.setFramerateLimit(60);
 
   CPUFramebuffer framebuffer(window);
@@ -682,15 +785,12 @@ int main() {
 
   float t = 0;
 
-  std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-  std::mt19937 rng;
-
   rigidbody rb;
 
   RayMarcher raymarcher(&framebuffer, &depthBuffer, &player.cam);
 
-  //rb.addTorque({0.0, 1.0, 0.0});
-  //rb.addTorque({0.0, 0.0, 1.0});
+  // rb.addTorque({0.0, 1.0, 0.0});
+  // rb.addTorque({0.0, 0.0, 1.0});
   while (window.isOpen()) {
 
     window.clear(sf::Color::Black);
@@ -708,44 +808,11 @@ int main() {
       }
     }
 
-    for (int x = 0; x < BUFFER_WIDTH; x++) {
-      for (int y = 0; y < BUFFER_HEIGHT; y++) {
-
-        framebuffer.mixPixel(x, y, sf::Color::Black, 0.5f);
-      }
-    }
-
     std::chrono::steady_clock::time_point begin =
         std::chrono::steady_clock::now();
 
-    for (int i = 0; i < 100000; i++) {
-
-      float u = dist(rng) * 1.0f;
-      float v = dist(rng);
-      // float w = dist(rng);
-
-      // simple torus
-      vec3 p = {cosf(2.0f * M_PI * u) * (1.0f + 0.5f * cosf(2.0f * M_PI * v)),
-                sinf(2.0f * M_PI * u) * (1.0f + 0.5f * cosf(2.0f * M_PI * v)),
-                0.5f * sinf(2.0f * M_PI * v)};
-
-      vec3 n = {cosf(2.0f * M_PI * u) * cosf(2.0f * M_PI * v),
-                sinf(2.0f * M_PI * u) * cosf(2.0f * M_PI * v),
-                sinf(2.0f * M_PI * v)};
-
-      n = rb.translate(n);
-
-      vec3 sp = player.cam.worldToWindow(
-          rb.translate(p), framebuffer.getWidth(), framebuffer.getHeight());
-
-      sf::Color color = colormaps::grayscale(n.x * 0.5f + 0.5f);
-
-
-
-      if (sp.z > 0.0f && depthBuffer.testAndSet(sp.x, sp.y, sp.z)) {
-        framebuffer.mixPixel(sp.x, sp.y, color, 0.5f);
-      }
-    }
+    framebuffer.clear(sf::Color::Black);
+    raymarcher.render();
 
     std::chrono::steady_clock::time_point end =
         std::chrono::steady_clock::now();
