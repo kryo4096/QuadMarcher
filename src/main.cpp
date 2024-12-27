@@ -10,6 +10,8 @@
 #include <iostream>
 #include <omp.h>
 #include <random>
+#include <utility>
+#include <cassert>
 
 class CPUFramebuffer {
 private:
@@ -206,54 +208,51 @@ struct vec3 {
   }
 };
 
-class DepthBuffer {
-private:
-  float *depth;
+template <typename T> class PixelBuffer {
+protected:
+  T *data;
   unsigned int width;
   unsigned int height;
 
 public:
-  DepthBuffer(unsigned int w, unsigned int h) : width(w), height(h) {
-    depth = new float[w * h];
-    clear();
+  PixelBuffer(unsigned int w, unsigned int h) : width(w), height(h) {
+    data = new T[w * h];
   }
 
-  DepthBuffer(const sf::Window &window)
-      : DepthBuffer(window.getSize().x, window.getSize().y) {}
+  PixelBuffer(const sf::Window &window)
+      : PixelBuffer(window.getSize().x, window.getSize().y) {}
 
-  ~DepthBuffer() { delete[] depth; }
-
-  void clear() {
-    for (unsigned int i = 0; i < width * height; i++) {
-      depth[i] = 100.0f; // Initialize to maximum depth
-    }
-  }
-
-  void setDepth(unsigned int x, unsigned int y, float d) {
+  void setPixel(unsigned int x, unsigned int y, T t) {
+    if (x < 0 || y < 0) 
+      return;
+    
     if (x >= width || y >= height)
       return;
 
-    depth[y * width + x] = d;
+    data[y * width + x] = t;
   }
 
-  float getDepth(unsigned int x, unsigned int y) const {
-    if (x >= width || y >= height)
-      return 1.0f;
+  T getPixel(unsigned int x, unsigned int y) { return data[y * width + x]; }
 
-    return depth[y * width + x];
-  }
+  void fillRect(int x0, int y0, int x1, int y1, T value) {
+    x0 = std::max(x0, 0);
+    x1 = std::min(x1, (int)width);
+    y0 = std::max(y0, 0);
+    y1 = std::min(y1, (int)height);
 
-  bool testAndSet(unsigned int x, unsigned int y, float d) const {
-    if (x >= width || y >= height)
-      return false;
-
-    if (d < depth[y * width + x]) {
-      depth[y * width + x] = d;
-      return true;
-    } else {
-      return false;
+    for (int y = y0; y < y1; y++) {
+      for (int x = x0; x < x1; x++) {
+        setPixel(x, y, value);
+      }
     }
   }
+
+  void swap(PixelBuffer& other) {
+    assert(width = other.width && height == other.height);
+    std::swap(data, other.data);
+  }
+
+  ~PixelBuffer() { delete[] data; }
 };
 
 // Represents a normalized quaternion for 3D rotation
@@ -565,7 +564,7 @@ struct FirstPersonMouse {
     sf::Vector2i mouse = sf::Mouse::getPosition();
 
     yaw += (mouse.x - center.x) * sensitivity;
-    pitch += (mouse.y - center.y) * sensitivity;
+    pitch -= (mouse.y - center.y) * sensitivity;
 
     if (pitch > 89.0f)
       pitch = 89.0f;
@@ -631,34 +630,40 @@ struct FirstPersonController {
   }
 };
 
+class RayMarchableScene {
+public:
+  virtual float f(const vec3 &p) = 0;
+  virtual vec3 normal(const vec3 &p) {
+    const float epsilon = 0.01f;
+    return vec3(f(p + vec3(epsilon, 0, 0)) - f(p - vec3(epsilon, 0, 0)),
+                f(p + vec3(0, epsilon, 0)) - f(p - vec3(0, epsilon, 0)),
+                f(p + vec3(0, 0, epsilon)) - f(p - vec3(0, 0, epsilon)))
+        .normalized();
+  }
+};
+
+class SphereScene : public RayMarchableScene {
+  float f(const vec3 &p) override {
+    return p.lengthSq() - 1;
+  }
+
+};
+
 class RayMarcher {
 public:
   CPUFramebuffer *buffer;
-  DepthBuffer *depthBuffer;
+  PixelBuffer<int> levelBuf1, levelBuf2;
+
   Camera *cam;
+  RayMarchableScene *scene;
+
+  bool wireframe = false;
 
   std::mt19937 rng;
 
-  RayMarcher(CPUFramebuffer *buffer, DepthBuffer *depthBuffer, Camera *cam)
-      : buffer(buffer), depthBuffer(depthBuffer), cam(cam) {}
-
-  float sphere(const vec3 &p, float radius) { return p.length() - radius; }
-
-  float torus(const vec3 &p, float majorRadius, float minorRadius) {
-    return sqrtf(p.x * p.x + p.y * p.y) - majorRadius;
-  }
-
-  float plane(const vec3 &p, const vec3 &n, float d) { return p.dot(n) + d; }
-
-  float scene(const vec3 &p) { return sinf(p.x) + sinf(p.y) + sinf(p.z); }
-
-  vec3 normal(const vec3 &p) {
-    const float epsilon = 0.01f;
-    return vec3(scene(p + vec3(epsilon, 0, 0)) - scene(p - vec3(epsilon, 0, 0)),
-                scene(p + vec3(0, epsilon, 0)) - scene(p - vec3(0, epsilon, 0)),
-                scene(p + vec3(0, 0, epsilon)) - scene(p - vec3(0, 0, epsilon)))
-        .normalized();
-  }
+  RayMarcher(CPUFramebuffer *buffer, Camera *cam, RayMarchableScene *scene)
+      : buffer(buffer), cam(cam), scene(scene),
+        levelBuf1(buffer->getWidth(), buffer->getHeight()), levelBuf2(buffer->getWidth(), buffer->getHeight()) {}
 
   float raymarch(const vec3 &origin, const vec3 &direction, float maxDistance,
                  float epsilon, float minDistance, vec3 &normal) {
@@ -672,7 +677,7 @@ public:
 
     for (int i = 0; i < 100; i++) {
 
-      float dist = scene(p);
+      float dist = scene->f(p);
 
       if (dist < epsilon) {
 
@@ -680,19 +685,19 @@ public:
         break;
       }
 
-      vec3 dp = d * v;
+      vec3 dp = d * dist * 0.9f;
 
       p += dp;
+      // v+= 0.001f;
       t += dp.length();
-      v += 0.001f;
     }
 
-    normal = this->normal(p);
+    normal = scene->normal(p);
 
     return ret;
   }
 
-  void renderQuadrantRecursive(int x0, int y0, int x1, int y1, float prevDepth,
+  int renderQuadrantRecursive(int x0, int y0, int x1, int y1, float prevDepth,
                                int level) {
 
     int w = x1 - x0;
@@ -718,33 +723,64 @@ public:
 
     float depth =
         raymarch(cam->position, direction, cam->farPlane, 0.01f, 0.01f, normal);
-    sf::Color color = colormaps::grayscale(
-        (-direction.dot(normal) * 0.5 + 0.5) * (exp(-depth * 0.1)));
+
+    sf::Color color = colormaps::grayscale((normal.x * 0.5 + 0.5));
+
+    sf::Color bg = colormaps::turbo((direction.x * 0.5 + 0.5));
+
+    color = mix(color, bg, 1 - exp(-0.1 * depth));
 
     // color = mix(color, sf::Color::Black, normal.x);
 
-    float errorHeuristic = normal.cross(direction).lengthSq() * powf(2.0, -2 * level);
+    float errorHeuristic =
+        normal.cross(direction).lengthSq() * powf(2.0, -2 * level) +
+        1.0 * std::fabsf(depth - prevDepth);
 
-    if (level < 3 ||
-         (errorHeuristic > 0.0001 || depth == INFINITY)&&
-            level < 7) {
+    int levelDiff = 0;
+
+    for (int dir = -1; dir <= 1; dir += 2) {
+      int xNeigh = x + (x1 - x0) * dir;
+      int yNeigh = y + (y1 - y0) * dir;
+
+      if (xNeigh < (int)buffer->getWidth() && xNeigh > 0) {
+        levelDiff = std::max(levelDiff, levelBuf1.getPixel(xNeigh, y) - level);
+      }
+
+      if (yNeigh < (int)buffer->getHeight() && yNeigh > 0) {
+        levelDiff = std::max(levelDiff, levelBuf1.getPixel(x, yNeigh) - level);
+      }
+    }
+
+    int maxLevel = level;
+    
+
+    if (level < 3 || (errorHeuristic > 0.01 || levelDiff > 1) && level < 7) {
       int xMid = 0.5 * (x0 + x1);
       int yMid = 0.5 * (y0 + y1);
 
-      renderQuadrantRecursive(x0, y0, xMid, yMid, depth, level + 1);
-      renderQuadrantRecursive(xMid, y0, x1, yMid, depth, level + 1);
-      renderQuadrantRecursive(x0, yMid, xMid, y1, depth, level + 1);
-      renderQuadrantRecursive(xMid, yMid, x1, y1, depth, level + 1);
+     
+      maxLevel = std::max(maxLevel, renderQuadrantRecursive(x0, y0, xMid, yMid, depth, level + 1));
+      maxLevel = std::max(maxLevel, renderQuadrantRecursive(xMid, y0, x1, yMid, depth, level + 1));
+      maxLevel = std::max(maxLevel, renderQuadrantRecursive(x0, yMid, xMid, y1, depth, level + 1));
+      maxLevel = std::max(maxLevel, renderQuadrantRecursive(xMid, yMid, x1, y1, depth, level + 1));
 
     } else {
 
-      // buffer->drawLine(x0, y0, x1, y0, color);
-      // buffer->drawLine(x1, y0, x1, y1, color);
-      // buffer->drawLine(x1, y1, x0, y1, color);
-      // buffer->drawLine(x0, y1, x0, y0, color);
-      buffer->fillRect(x0, y0, x1, y1, color);
-      // buffer->setPixel(x, y, color);
+      if (wireframe) {
+        buffer->drawLine(x0, y0, x1, y0, color);
+        buffer->drawLine(x1, y0, x1, y1, color);
+        buffer->drawLine(x1, y1, x0, y1, color);
+        buffer->drawLine(x0, y1, x0, y0, color);
+      } else {
+
+        buffer->fillRect(x0, y0, x1, y1, color);
+        
+      }
     }
+
+    levelBuf2.fillRect(x0, y0, x1, y1, maxLevel);
+
+    return maxLevel;
   }
 
   void render() {
@@ -754,18 +790,33 @@ public:
     int x_offset = offsetDist(rng);
     int y_offset = offsetDist(rng);
 
-    int partitionWidth = buffer->getWidth() / 3;
-    int partitionHeight = buffer->getHeight() / 2;
+    int partitionWidth = buffer->getWidth() / 16;
+    int partitionHeight = buffer->getHeight() / 9;
 
-    #pragma omp parallel for
-    for (int k = 0; k < 6; k++) {
-      int i = k % 3;
-      int j = k / 3;
-      renderQuadrantRecursive(i * partitionWidth, j * partitionHeight,
-                              (i + 1) * partitionWidth,
-                              (j + 1) * partitionHeight, 100000.0, 0);
+    buffer->clear(sf::Color::Black);
+    x_offset = 0;
+    y_offset = 0;
+
+ 
+    
+
+#pragma omp parallel for
+    for (int k = 0; k < 16 * 9; k++) {
+      int i = k % 16;
+      int j = k / 16;
+      renderQuadrantRecursive(
+          i * partitionWidth + x_offset, j * partitionHeight + y_offset,
+          (i + 1) * partitionWidth + x_offset,
+          (j + 1) * partitionHeight + y_offset, 100000.0, 0);
     }
+
+    levelBuf1.swap(levelBuf2);
+
+    
+
   }
+
+  void toggleWireframe() { wireframe = !wireframe; }
 };
 
 int main() {
@@ -776,18 +827,20 @@ int main() {
   window.setFramerateLimit(60);
 
   CPUFramebuffer framebuffer(window);
-  DepthBuffer depthBuffer(window);
 
   int mouse_x = 0;
   int mouse_y = 0;
 
   FirstPersonController player(&window);
+  player.cam.position = {0, 0, -2};
 
   float t = 0;
 
   rigidbody rb;
 
-  RayMarcher raymarcher(&framebuffer, &depthBuffer, &player.cam);
+  SphereScene scene;
+
+  RayMarcher raymarcher(&framebuffer, &player.cam, &scene);
 
   // rb.addTorque({0.0, 1.0, 0.0});
   // rb.addTorque({0.0, 0.0, 1.0});
@@ -805,13 +858,16 @@ int main() {
         if (event.key.code == sf::Keyboard::Escape) {
           window.close();
         }
+        if (event.key.code == sf::Keyboard::R) {
+          raymarcher.toggleWireframe();
+        }
       }
     }
 
     std::chrono::steady_clock::time_point begin =
         std::chrono::steady_clock::now();
 
-    framebuffer.clear(sf::Color::Black);
+    // framebuffer.clear(sf::Color::Black);
     raymarcher.render();
 
     std::chrono::steady_clock::time_point end =
@@ -822,8 +878,6 @@ int main() {
                                                                        begin)
                      .count()
               << "[µs]" << std::endl;
-
-    depthBuffer.clear();
 
     framebuffer.drawTo(window);
 
