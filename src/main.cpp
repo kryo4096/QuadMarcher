@@ -159,6 +159,7 @@ public:
     window.draw(sprite);
   }
 };
+
 struct vec3 {
   float x, y, z;
 
@@ -198,7 +199,9 @@ struct vec3 {
             x * rhs.y - y * rhs.x};
   }
 
-  float lengthSq() const { return dot(*this); }
+  float lengthSq() const {
+    return x * x + y * y + z * z;
+  }
 
   float length() const { return sqrtf(lengthSq()); }
 
@@ -573,16 +576,23 @@ struct FirstPersonMouse {
     sf::Vector2i center(window->getPosition().x + window->getSize().x / 2,
                         window->getPosition().y + window->getSize().y / 2);
 
-    sf::Vector2i mouse = sf::Mouse::getPosition();
+    sf::Vector2i mouseDelta = sf::Mouse::getPosition() - center;
 
-    yaw += (mouse.x - center.x) * sensitivity;
-    pitch -= (mouse.y - center.y) * sensitivity;
+    float mouseDeltaX = mouseDelta.x;
+    float mouseDeltaY = mouseDelta.y;
 
-    if (pitch > 89.0f)
-      pitch = 89.0f;
+    float len = sqrtf(mouseDeltaX * mouseDeltaX + mouseDeltaY * mouseDeltaY);
 
-    if (pitch < -89.0f)
-      pitch = -89.0f;
+
+    if (len > 100.0f) {
+      std::cout << "Mouse delta too large: " << len << std::endl;
+      float factor = 100.0f / len;
+      mouseDeltaX *= factor;
+      mouseDeltaY *= factor;
+    }
+
+    yaw += mouseDeltaX  * sensitivity;
+    pitch += mouseDeltaY * sensitivity;
 
     sf::Mouse::setPosition(center);
   }
@@ -604,9 +614,10 @@ struct FirstPersonController {
 
   void update(float dt) {
 
-    const float speed = 5.0f;
+    const float speed = 5.0f * cam.position.length();
 
     vec3 velocity = {0, 0, 0};
+
 
     if (sf::Keyboard::isKeyPressed(sf::Keyboard::W)) {
       velocity.z += 1;
@@ -664,7 +675,7 @@ class MandelbulbScene : public RayMarchableScene {
     float dr = 1.0;
     float r = 0.0;
 
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 6; i++) {
       r = z.length();
       if (r > 2.0)
         break;
@@ -672,7 +683,7 @@ class MandelbulbScene : public RayMarchableScene {
       // Convert to polar coordinates
       float theta = acosf(z.z / r);
       float phi = atan2f(z.y, z.x);
-      dr = powf(r, 8.0f) * 8.0f * dr + 1.0;
+      dr = powf(r, 7.0f) * 8.0f * dr + 1.0;
 
       // Scale and rotate the point
       float zr = powf(r, 8.0f);
@@ -689,66 +700,98 @@ class MandelbulbScene : public RayMarchableScene {
   }
 };
 
+struct RayMarchingConfig {
+  int maxIterations = 100;
+  float epsilon = 1e-3;
+  float minDistance = 1e-2;
+  float maxDistance = 100.0;
+  float refinementMultiplier = 0.5;
+  float jitterAAMagnitude = 0.001;
+  int maxRefinementLevel = 20;
+  int minTileSize = 1;
+  int numPartitionsX = 16;
+  int numPartitionsY = 10;
+};
+
 class RayMarcher {
 public:
   CPUFramebuffer *buffer;
-  PixelBuffer<int> levelBuf1, levelBuf2;
+  PixelBuffer<int> levelBufRead, levelBufWrite;
 
-  Camera *cam;
   RayMarchableScene *scene;
+  Camera *cam;
+
+  RayMarchingConfig config;
+
 
   bool wireframe = false;
 
   std::mt19937 rng;
 
-  RayMarcher(CPUFramebuffer *buffer, Camera *cam, RayMarchableScene *scene)
+  RayMarcher(CPUFramebuffer *buffer, Camera *cam, RayMarchableScene *scene, RayMarchingConfig config = {})
       : buffer(buffer), cam(cam), scene(scene),
-        levelBuf1(buffer->getWidth(), buffer->getHeight()),
-        levelBuf2(buffer->getWidth(), buffer->getHeight()) {
+        levelBufRead(buffer->getWidth(), buffer->getHeight()),
+        levelBufWrite(buffer->getWidth(), buffer->getHeight()), config(config) {
     rng.seed(std::random_device()());
 
-    levelBuf1.clear(0);
-    levelBuf2.clear(0);
+    levelBufRead.clear(0);
+    levelBufWrite.clear(0);
   }
 
-  float raymarch(const vec3 &origin, const vec3 &direction, float maxDistance,
-                 float epsilon, float minDistance, vec3 &normal) {
+  struct RayMarchResult {
+    float depth;
+    vec3 normal;
+    vec3 position;
+    int numSteps;
+    bool hit;
+  };
+
+  RayMarchResult raymarch(const vec3 &origin, const vec3 &direction, float maxDistance,
+                 float epsilon, float minDistance) {
     float t = minDistance;
-    float v = 0.01f;
 
     vec3 d = direction.normalized();
-    vec3 p = origin;
+    vec3 p = origin + d * minDistance;
 
-    float ret = INFINITY;
+    for (int i = 0; i < config.maxIterations; i++) {
 
-    normal = vec3(0, 0, 0);
-
-    for (int i = 0; i < 100; i++) {
 
       float dist = scene->f(p);
 
       if (dist < epsilon) {
 
-        ret = t;
-        normal = scene->normal(p);
-        break;
+        return RayMarchResult {
+          .depth = t, .normal = scene->normal(p),
+          .position = p, .numSteps = i, .hit = true
+        };
       }
 
-      vec3 dp = d * dist * 0.5f;
-
+      vec3 dp = d * dist;
       p += dp;
       t += dp.length();
-
-      v *= 1.03f;
     }
 
-    return ret;
+    if (p.length() < 2.0) {
+
+      return RayMarchResult{.depth = t,
+                            .normal = scene->normal(p),
+                            .position = p,
+                            .numSteps = 100,
+                            .hit = true};
+    } else
+    {
+      return RayMarchResult{.depth = INFINITY,
+                            .normal = vec3(0, 0, 0),
+                            .position = p,
+                            .numSteps = 100,
+                            .hit = false};
+    }
   }
 
   int renderQuadrantRecursive(int x0, int y0, int x1, int y1, float prevDepth,
                               int level) {
 
-    std::normal_distribution<float> aa(0.0f, 0.001f);
+    std::normal_distribution<float> jitterAAOffset(0.0f, config.jitterAAMagnitude);
 
     int w = x1 - x0;
     int h = y1 - y0;
@@ -756,14 +799,15 @@ public:
     int xMid = (x0 + x1) / 2;
     int yMid = (y0 + y1) / 2;
 
-    const float aperture = 0.1f;
+
     const float focalLength = 0.1f;
+    float aperture = focalLength * sinf(cam->fov / 2.0f);
 
     vec3 screenPos = {(xMid - 0.5f * buffer->getWidth()) / buffer->getHeight(),
-                      (yMid - 0.5f * buffer->getHeight()) / buffer->getHeight(),
+                      -(yMid - 0.5f * buffer->getHeight()) / buffer->getHeight(),
                       0};
 
-    screenPos += vec3(aa(rng), aa(rng), 0);
+    screenPos += vec3(jitterAAOffset(rng), jitterAAOffset(rng), 0);
 
     screenPos *= aperture;
     screenPos.z = focalLength;
@@ -771,58 +815,69 @@ public:
     vec3 worldPos = (cam->orientation * screenPos) + cam->position;
     vec3 direction = (worldPos - cam->position).normalized();
 
-    vec3 normal;
 
-    float depth =
-        raymarch(cam->position, direction, cam->farPlane, 0.01f, 0.01f, normal);
 
-    sf::Color color = colormaps::turbo(normal.x * 0.5 + 0.5);
+    auto result = raymarch(cam->position, direction, cam->farPlane, 1e-3, 1e-2);
 
-    sf::Color bg = colormaps::turbo((direction.x * 0.5 + 0.5));
+    sf::Color color = colormaps::viridis(1.0f - result.numSteps / (float)config.maxIterations);
 
-    color = mix(color, bg, 1.0f - expf(-0.01 * depth));
+    color = mix(color, sf::Color::White, 1.0f - expf(-0.1 * result.depth));
 
-    // color = mix(color, sf::Color::Black, normal.x);
+    sf::Color bg = colormaps::viridis((direction.x * 0.5 + 0.5));
+
+    color = mix(color, bg, 1.0f - expf(-0.01 * result.depth));
+
+
+
+    //color = mix(color, sf::Color::Black, omp_get_thread_num() / 32.0f);
+
+    //color = mix(color, sf::Color::Black, 0.5f * result.normal.x + 0.5f);
 
     float errorHeuristic =
-        normal.cross(direction).lengthSq() * powf(2.0f, -2 * level);
+        result.normal.cross(direction).lengthSq() * powf(2.0f, -2 * level);
 
     int maxNeighLevel = 0;
 
     maxNeighLevel =
-        std::max(maxNeighLevel, levelBuf1.getPixelOrDefault(xMid - w, yMid));
+        std::max(maxNeighLevel, levelBufRead.getPixelOrDefault(xMid - w, yMid));
     maxNeighLevel =
-        std::max(maxNeighLevel, levelBuf1.getPixelOrDefault(xMid + w, yMid));
+        std::max(maxNeighLevel, levelBufRead.getPixelOrDefault(xMid + w, yMid));
     maxNeighLevel =
-        std::max(maxNeighLevel, levelBuf1.getPixelOrDefault(xMid, yMid - h));
+        std::max(maxNeighLevel, levelBufRead.getPixelOrDefault(xMid, yMid - h));
     maxNeighLevel =
-        std::max(maxNeighLevel, levelBuf1.getPixelOrDefault(xMid, yMid + h));
+        std::max(maxNeighLevel, levelBufRead.getPixelOrDefault(xMid, yMid + h));
 
     int maxLevel = level;
 
-    if ((errorHeuristic > 1e-3f || maxNeighLevel - level > 1) && level < 6) {
+    bool split = false;
+
+    if (config.refinementMultiplier*result.numSteps - (1 << level) > 0 && result.hit) {
+      split = true;
+    }
+
+    if(w < config.minTileSize || h < config.minTileSize) {
+      split = false;
+    }
+
+    if ((split || maxNeighLevel - level > 1) && level < config.maxRefinementLevel) {
 
       maxLevel = std::max(maxLevel, renderQuadrantRecursive(x0, y0, xMid, yMid,
-                                                            depth, level + 1));
+                                                            result.depth, level + 1));
       maxLevel = std::max(maxLevel, renderQuadrantRecursive(xMid, y0, x1, yMid,
-                                                            depth, level + 1));
+                                                            result.depth, level + 1));
       maxLevel = std::max(maxLevel, renderQuadrantRecursive(x0, yMid, xMid, y1,
-                                                            depth, level + 1));
+                                                            result.depth, level + 1));
       maxLevel = std::max(maxLevel, renderQuadrantRecursive(xMid, yMid, x1, y1,
-                                                            depth, level + 1));
+                                                            result.depth, level + 1));
 
     } else {
-
-      if (wireframe) {
-        buffer->drawLine(x0, y0, x1, y0, color);
-        buffer->drawLine(x1, y0, x1, y1, color);
-        buffer->drawLine(x1, y1, x0, y1, color);
-        buffer->drawLine(x0, y1, x0, y0, color);
-      } else {
-        buffer->mixRect(x0, y0, x1, y1, color, 0.5f);
+      buffer->mixRect(x0, y0, x1, y1, color, 0.5f);
+      
+      if (wireframe || !result.hit) {
+        buffer->fillRect(x0+1, y0+1, x1-1, y1-1, mix(sf::Color::White, color, 0.5f));
       }
 
-      levelBuf2.fillRect(x0, y0, x1, y1, level);
+      levelBufWrite.fillRect(x0, y0, x1, y1, level);
     }
 
     return maxLevel;
@@ -831,19 +886,17 @@ public:
   void render() {
 
 
-    int partitionWidth = buffer->getWidth() / 16;
-    int partitionHeight = buffer->getHeight() / 9;
+    int partitionWidth = buffer->getWidth() / config.numPartitionsX;
+    int partitionHeight = buffer->getHeight() / config.numPartitionsY;
 
     if(wireframe) {
       buffer->clear(sf::Color::Black);
     }
 
-#pragma omp parallel for
-    for (int k = 0; k < 16 * 9; k++) {
-      int i = k % 16;
-      int j = k / 16;
-
- 
+#pragma omp parallel for schedule(dynamic)
+    for (int k = 0; k < config.numPartitionsX * config.numPartitionsY; k++) {
+      int i = k % config.numPartitionsX;
+      int j = k / config.numPartitionsX;
 
       renderQuadrantRecursive(
           i * partitionWidth, j * partitionHeight,
@@ -851,7 +904,7 @@ public:
           (j + 1) * partitionHeight, 100000.0, 0);
     }
 
-    levelBuf1.swap(levelBuf2);
+    levelBufRead.swap(levelBufWrite);
   }
 
   void toggleWireframe() { wireframe = !wireframe; }
@@ -862,22 +915,16 @@ int main() {
   auto videoMode = sf::VideoMode::getFullscreenModes()[0];
 
   sf::RenderWindow window(videoMode, "Raymarching Test", sf::Style::Fullscreen);
-  window.setFramerateLimit(30);
+  window.setFramerateLimit(60);
 
   CPUFramebuffer framebuffer(window);
 
-  int mouse_x = 0;
-  int mouse_y = 0;
-
   FirstPersonController player(&window);
-  player.cam.position = {0, 0, -2};
+  player.cam.position = {0, 0, -5};
 
   float t = 0;
 
-  rigidbody rb;
-
   MandelbulbScene scene;
-
   RayMarcher raymarcher(&framebuffer, &player.cam, &scene);
 
   // rb.addTorque({0.0, 1.0, 0.0});
@@ -922,7 +969,6 @@ int main() {
     window.display();
 
     t += 0.01f;
-    rb.update(0.01f);
     player.update(0.01f);
   }
 
