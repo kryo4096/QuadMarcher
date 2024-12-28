@@ -5,13 +5,13 @@
 #include <SFML/Window/Window.hpp>
 #include <array>
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <iostream>
 #include <omp.h>
 #include <random>
 #include <utility>
-#include <cassert>
 
 class CPUFramebuffer {
 private:
@@ -222,37 +222,49 @@ public:
   PixelBuffer(const sf::Window &window)
       : PixelBuffer(window.getSize().x, window.getSize().y) {}
 
-  void setPixel(unsigned int x, unsigned int y, T t) {
-    if (x < 0 || y < 0) 
+  void setPixel(int x, int y, T t) {
+    if (x < 0 || y < 0)
       return;
-    
+
     if (x >= width || y >= height)
       return;
 
     data[y * width + x] = t;
   }
 
-  T getPixel(unsigned int x, unsigned int y) { return data[y * width + x]; }
+  T getPixel(int x, int y) { return data[y * width + x]; }
+
+  T getPixelOrDefault(int x, int y, T def = 0) {
+
+    if (x < 0 || y < 0)
+      return def;
+
+    if (x >= width || y >= height)
+      return def;
+
+    return data[y * width + x];
+  }
 
   void fillRect(int x0, int y0, int x1, int y1, T value) {
-    x0 = std::max(x0, 0);
-    x1 = std::min(x1, (int)width);
-    y0 = std::max(y0, 0);
-    y1 = std::min(y1, (int)height);
-
     for (int y = y0; y < y1; y++) {
       for (int x = x0; x < x1; x++) {
-        setPixel(x, y, value);
+        data[y * width + x] = value;
       }
     }
   }
 
-  void swap(PixelBuffer& other) {
-    assert(width = other.width && height == other.height);
-    std::swap(data, other.data);
+  void swap(PixelBuffer &other) {
+    assert(width == other.width && height == other.height);
+    T *temp = data;
+    data = other.data;
+    other.data = temp;
   }
 
-  ~PixelBuffer() { delete[] data; }
+  void clear(T value) {
+    for (unsigned int i = 0; i < width * height; i++) {
+      data[i] = value;
+    }
+  }
 };
 
 // Represents a normalized quaternion for 3D rotation
@@ -643,10 +655,38 @@ public:
 };
 
 class SphereScene : public RayMarchableScene {
-  float f(const vec3 &p) override {
-    return p.lengthSq() - 1;
-  }
+  float f(const vec3 &p) override { return p.length() - 1; }
+};
 
+class MandelbulbScene : public RayMarchableScene {
+  float f(const vec3 &p) override {
+    vec3 z = p;
+    float dr = 1.0;
+    float r = 0.0;
+
+    for (int i = 0; i < 5; i++) {
+      r = z.length();
+      if (r > 2.0)
+        break;
+
+      // Convert to polar coordinates
+      float theta = acosf(z.z / r);
+      float phi = atan2f(z.y, z.x);
+      dr = powf(r, 8.0f) * 8.0f * dr + 1.0;
+
+      // Scale and rotate the point
+      float zr = powf(r, 8.0f);
+      theta = theta * 8.0f;
+      phi = phi * 8.0f;
+
+      // Convert back to cartesian coordinates
+      z = vec3(sinf(theta) * cosf(phi), sinf(phi) * sinf(theta), cosf(theta)) *
+          zr;
+      z += p;
+    }
+
+    return 0.5f * logf(r) * r / dr;
+  }
 };
 
 class RayMarcher {
@@ -663,17 +703,25 @@ public:
 
   RayMarcher(CPUFramebuffer *buffer, Camera *cam, RayMarchableScene *scene)
       : buffer(buffer), cam(cam), scene(scene),
-        levelBuf1(buffer->getWidth(), buffer->getHeight()), levelBuf2(buffer->getWidth(), buffer->getHeight()) {}
+        levelBuf1(buffer->getWidth(), buffer->getHeight()),
+        levelBuf2(buffer->getWidth(), buffer->getHeight()) {
+    rng.seed(std::random_device()());
+
+    levelBuf1.clear(0);
+    levelBuf2.clear(0);
+  }
 
   float raymarch(const vec3 &origin, const vec3 &direction, float maxDistance,
                  float epsilon, float minDistance, vec3 &normal) {
     float t = minDistance;
-    float v = 0.1f;
+    float v = 0.01f;
 
     vec3 d = direction.normalized();
     vec3 p = origin;
 
     float ret = INFINITY;
+
+    normal = vec3(0, 0, 0);
 
     for (int i = 0; i < 100; i++) {
 
@@ -682,36 +730,40 @@ public:
       if (dist < epsilon) {
 
         ret = t;
+        normal = scene->normal(p);
         break;
       }
 
-      vec3 dp = d * dist * 0.9f;
+      vec3 dp = d * dist * 0.5f;
 
       p += dp;
-      // v+= 0.001f;
       t += dp.length();
-    }
 
-    normal = scene->normal(p);
+      v *= 1.03f;
+    }
 
     return ret;
   }
 
   int renderQuadrantRecursive(int x0, int y0, int x1, int y1, float prevDepth,
-                               int level) {
+                              int level) {
+
+    std::normal_distribution<float> aa(0.0f, 0.001f);
 
     int w = x1 - x0;
     int h = y1 - y0;
 
-    float x = 0.5 * (x0 + x1);
-    float y = 0.5 * (y0 + y1);
+    int xMid = (x0 + x1) / 2;
+    int yMid = (y0 + y1) / 2;
 
     const float aperture = 0.1f;
     const float focalLength = 0.1f;
 
-    vec3 screenPos = {(x - 0.5f * buffer->getWidth()) / buffer->getHeight(),
-                      (y - 0.5f * buffer->getHeight()) / buffer->getHeight(),
+    vec3 screenPos = {(xMid - 0.5f * buffer->getWidth()) / buffer->getHeight(),
+                      (yMid - 0.5f * buffer->getHeight()) / buffer->getHeight(),
                       0};
+
+    screenPos += vec3(aa(rng), aa(rng), 0);
 
     screenPos *= aperture;
     screenPos.z = focalLength;
@@ -724,45 +776,40 @@ public:
     float depth =
         raymarch(cam->position, direction, cam->farPlane, 0.01f, 0.01f, normal);
 
-    sf::Color color = colormaps::grayscale((normal.x * 0.5 + 0.5));
+    sf::Color color = colormaps::turbo(normal.x * 0.5 + 0.5);
 
     sf::Color bg = colormaps::turbo((direction.x * 0.5 + 0.5));
 
-    color = mix(color, bg, 1 - exp(-0.1 * depth));
+    color = mix(color, bg, 1.0f - expf(-0.01 * depth));
 
     // color = mix(color, sf::Color::Black, normal.x);
 
     float errorHeuristic =
-        normal.cross(direction).lengthSq() * powf(2.0, -2 * level) +
-        1.0 * std::fabsf(depth - prevDepth);
+        normal.cross(direction).lengthSq() * powf(2.0f, -2 * level);
 
-    int levelDiff = 0;
+    int maxNeighLevel = 0;
 
-    for (int dir = -1; dir <= 1; dir += 2) {
-      int xNeigh = x + (x1 - x0) * dir;
-      int yNeigh = y + (y1 - y0) * dir;
-
-      if (xNeigh < (int)buffer->getWidth() && xNeigh > 0) {
-        levelDiff = std::max(levelDiff, levelBuf1.getPixel(xNeigh, y) - level);
-      }
-
-      if (yNeigh < (int)buffer->getHeight() && yNeigh > 0) {
-        levelDiff = std::max(levelDiff, levelBuf1.getPixel(x, yNeigh) - level);
-      }
-    }
+    maxNeighLevel =
+        std::max(maxNeighLevel, levelBuf1.getPixelOrDefault(xMid - w, yMid));
+    maxNeighLevel =
+        std::max(maxNeighLevel, levelBuf1.getPixelOrDefault(xMid + w, yMid));
+    maxNeighLevel =
+        std::max(maxNeighLevel, levelBuf1.getPixelOrDefault(xMid, yMid - h));
+    maxNeighLevel =
+        std::max(maxNeighLevel, levelBuf1.getPixelOrDefault(xMid, yMid + h));
 
     int maxLevel = level;
-    
 
-    if (level < 3 || (errorHeuristic > 0.01 || levelDiff > 1) && level < 7) {
-      int xMid = 0.5 * (x0 + x1);
-      int yMid = 0.5 * (y0 + y1);
+    if ((errorHeuristic > 1e-3f || maxNeighLevel - level > 1) && level < 6) {
 
-     
-      maxLevel = std::max(maxLevel, renderQuadrantRecursive(x0, y0, xMid, yMid, depth, level + 1));
-      maxLevel = std::max(maxLevel, renderQuadrantRecursive(xMid, y0, x1, yMid, depth, level + 1));
-      maxLevel = std::max(maxLevel, renderQuadrantRecursive(x0, yMid, xMid, y1, depth, level + 1));
-      maxLevel = std::max(maxLevel, renderQuadrantRecursive(xMid, yMid, x1, y1, depth, level + 1));
+      maxLevel = std::max(maxLevel, renderQuadrantRecursive(x0, y0, xMid, yMid,
+                                                            depth, level + 1));
+      maxLevel = std::max(maxLevel, renderQuadrantRecursive(xMid, y0, x1, yMid,
+                                                            depth, level + 1));
+      maxLevel = std::max(maxLevel, renderQuadrantRecursive(x0, yMid, xMid, y1,
+                                                            depth, level + 1));
+      maxLevel = std::max(maxLevel, renderQuadrantRecursive(xMid, yMid, x1, y1,
+                                                            depth, level + 1));
 
     } else {
 
@@ -772,48 +819,39 @@ public:
         buffer->drawLine(x1, y1, x0, y1, color);
         buffer->drawLine(x0, y1, x0, y0, color);
       } else {
-
-        buffer->fillRect(x0, y0, x1, y1, color);
-        
+        buffer->mixRect(x0, y0, x1, y1, color, 0.5f);
       }
-    }
 
-    levelBuf2.fillRect(x0, y0, x1, y1, maxLevel);
+      levelBuf2.fillRect(x0, y0, x1, y1, level);
+    }
 
     return maxLevel;
   }
 
   void render() {
 
-    std::uniform_int_distribution<int> offsetDist(-10, 10);
-
-    int x_offset = offsetDist(rng);
-    int y_offset = offsetDist(rng);
 
     int partitionWidth = buffer->getWidth() / 16;
     int partitionHeight = buffer->getHeight() / 9;
 
-    buffer->clear(sf::Color::Black);
-    x_offset = 0;
-    y_offset = 0;
-
- 
-    
+    if(wireframe) {
+      buffer->clear(sf::Color::Black);
+    }
 
 #pragma omp parallel for
     for (int k = 0; k < 16 * 9; k++) {
       int i = k % 16;
       int j = k / 16;
+
+ 
+
       renderQuadrantRecursive(
-          i * partitionWidth + x_offset, j * partitionHeight + y_offset,
-          (i + 1) * partitionWidth + x_offset,
-          (j + 1) * partitionHeight + y_offset, 100000.0, 0);
+          i * partitionWidth, j * partitionHeight,
+          (i + 1) * partitionWidth,
+          (j + 1) * partitionHeight, 100000.0, 0);
     }
 
     levelBuf1.swap(levelBuf2);
-
-    
-
   }
 
   void toggleWireframe() { wireframe = !wireframe; }
@@ -824,7 +862,7 @@ int main() {
   auto videoMode = sf::VideoMode::getFullscreenModes()[0];
 
   sf::RenderWindow window(videoMode, "Raymarching Test", sf::Style::Fullscreen);
-  window.setFramerateLimit(60);
+  window.setFramerateLimit(30);
 
   CPUFramebuffer framebuffer(window);
 
@@ -838,7 +876,7 @@ int main() {
 
   rigidbody rb;
 
-  SphereScene scene;
+  MandelbulbScene scene;
 
   RayMarcher raymarcher(&framebuffer, &player.cam, &scene);
 
