@@ -3,6 +3,9 @@
 #include <cstdint>
 
 #include <SFML/Graphics.hpp>
+#include <complex>
+
+#include <immintrin.h>
 
 template <size_t N> class ColorMap {
   std::array<sf::Color, N> colors;
@@ -104,4 +107,10 @@ static const auto heat =
 inline sf::Color mix(const sf::Color &a, const sf::Color &b, float t) {
   return sf::Color(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t,
                    a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t);
+}
+
+
+inline float distance(const sf::Color &a, const sf::Color &b) {
+  return 1.0f / std::sqrt(3.0f) * std::sqrtf((a.r - b.r) * (a.r - b.r) + (a.g - b.g) * (a.g - b.g) +
+                   (a.b - b.b) * (a.b - b.b) + (a.a - b.a) * (a.a - b.a)) / 255.0f;
 }

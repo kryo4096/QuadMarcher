@@ -14,8 +14,6 @@
 #include "raymarching.hpp"
 #include "camera.hpp"
 
-
-
 class SphereScene : public RayMarchableScene {
   float f(const vec3 &p) override { return p.length() - 1; }
   float maxRadius() override { return 1.0f; }
@@ -24,10 +22,10 @@ class SphereScene : public RayMarchableScene {
 class MandelbulbScene : public RayMarchableScene {
   float f(const vec3 &p) override {
     vec3 z = p;
-    float dr = 1.0;
-    float r = 0.0;
+    float dr = 1.0f;
+    float r = 0.0f;
 
-    rotation rot = rotation::fromAxisAngle({0, 0, 1}, omp_get_wtime() / 10.0f);
+    rotation rot = rotation::fromAxisAngle({0.0f, 0.0f, 1.0f}, omp_get_wtime() / 10.0f);
 
     for (int i = 0; i < 6; i++) {
       r = z.length();
@@ -35,19 +33,27 @@ class MandelbulbScene : public RayMarchableScene {
       if (r > 2.0)
         break;
 
+      float r2 = r * r;
+      float r4 = r2 * r2;
+      float r6 = r4 * r2;
+      float r8 = r4 * r4;
+      float r7 = r6 * r;
 
       // Convert to polar coordinates
       float theta = acosf(z.z / r);
       float phi = atan2f(z.y, z.x);
-      dr = powf(r, 7.0f) * 8.0f * dr + 1.0;
+
+      dr = r7 * 8.0f * dr + 1.0f;
 
       // Scale and rotate the point
-      float zr = powf(r, 8.0f);
+      float zr = r8;
       theta = theta * 8.0f;
       phi = phi * 8.0f;
 
+      float sinTheta = sinf(theta);
+  
       // Convert back to cartesian coordinates
-      z = vec3(sinf(theta) * cosf(phi), sinf(phi) * sinf(theta), cosf(theta)) *
+      z = vec3(sinTheta * cosf(phi), sinf(phi) * sinTheta, cosf(theta)) *
           zr;
       z += p;
 
@@ -64,14 +70,12 @@ int main() {
   sf::VideoMode videoMode = sf::VideoMode(1920, 1200);
 
   sf::RenderWindow window(videoMode, "Raymarching Test", sf::Style::Fullscreen);
-  window.setFramerateLimit(60);
+  window.setVerticalSyncEnabled(false);
 
   CPUFramebuffer framebuffer(window);
 
   FirstPersonController player(&window);
   player.cam.position = {0, 0, -5};
-
-  float t = 0;
 
   MandelbulbScene scene;
   RayMarcher raymarcher(&framebuffer, &player.cam, &scene);
@@ -117,7 +121,6 @@ int main() {
 
     window.display();
 
-    t += 0.01f;
     player.update(0.01f);
   }
 

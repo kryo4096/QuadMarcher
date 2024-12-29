@@ -7,11 +7,11 @@
 template <typename T> class PixelBuffer {
 protected:
   T *data;
-  unsigned int width;
-  unsigned int height;
+  int width;
+  int height;
 
 public:
-  PixelBuffer(unsigned int w, unsigned int h) : width(w), height(h) {
+  PixelBuffer(int w, int h) : width(w), height(h) {
     data = new T[w * h];
   }
 
@@ -57,7 +57,7 @@ public:
   }
 
   void clear(T value) {
-    for (unsigned int i = 0; i < width * height; i++) {
+    for (int i = 0; i < width * height; i++) {
       data[i] = value;
     }
   }
@@ -72,13 +72,13 @@ private:
   sf::Texture texture;
   sf::Uint8 *pixels;
   sf::Sprite sprite;
-  unsigned int width;
-  unsigned int height;
+  int width;
+  int height;
 
   sf::Uint8 *backbuffer;
 
 public:
-  CPUFramebuffer(unsigned int w, unsigned int h) : width(w), height(h) {
+  CPUFramebuffer(int w, int h) : width(w), height(h) {
     // Allocate pixel buffer - 4 bytes per pixel (RGBA)
     pixels = new sf::Uint8[w * h * 4];
     backbuffer = new sf::Uint8[w * h * 4];
@@ -102,7 +102,7 @@ public:
   }
 
   void clear(sf::Color color) {
-    for (unsigned int i = 0; i < width * height * 4; i += 4) {
+    for (int i = 0; i < width * height * 4; i += 4) {
       pixels[i] = color.r;
       pixels[i + 1] = color.g;
       pixels[i + 2] = color.b;
@@ -111,33 +111,33 @@ public:
     update();
   }
 
-  void setPixel(unsigned int x, unsigned int y, sf::Color color) {
+  void setPixel(int x, int y, sf::Color color) {
     if (x >= width || y >= height)
       return;
 
-    unsigned int base = (y * width + x) * 4;
+    int base = (y * width + x) * 4;
     pixels[base] = color.r;
     pixels[base + 1] = color.g;
     pixels[base + 2] = color.b;
     pixels[base + 3] = color.a;
   }
 
-  void mixPixel(unsigned int x, unsigned int y, sf::Color color, float t) {
+  void mixPixel(int x, int y, sf::Color color, float t) {
     if (x >= width || y >= height)
       return;
 
-    unsigned int base = (y * width + x) * 4;
+    int base = (y * width + x) * 4;
     pixels[base] = pixels[base] + (color.r - pixels[base]) * t;
     pixels[base + 1] = pixels[base + 1] + (color.g - pixels[base + 1]) * t;
     pixels[base + 2] = pixels[base + 2] + (color.b - pixels[base + 2]) * t;
     pixels[base + 3] = pixels[base + 3] + (color.a - pixels[base + 3]) * t;
   }
 
-  sf::Color getPixel(unsigned int x, unsigned int y) const {
+  sf::Color getPixel(int x, int y) const {
     if (x >= width || y >= height)
       return sf::Color::Black;
 
-    unsigned int base = (y * width + x) * 4;
+    int base = (y * width + x) * 4;
     return sf::Color(backbuffer[base],backbuffer[base + 1], backbuffer[base + 2],
                      backbuffer[base + 3]);
   }
@@ -202,8 +202,8 @@ public:
   void update() { texture.update(pixels); }
 
   // Add getters for dimensions if needed
-  unsigned int getWidth() const { return width; }
-  unsigned int getHeight() const { return height; }
+  int getWidth() const { return width; }
+  int getHeight() const { return height; }
 
   void drawTo(sf::RenderWindow &window) {
     update();
